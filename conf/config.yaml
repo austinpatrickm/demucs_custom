@@ -8,7 +8,7 @@ defaults:
 
 dummy:
 dset:
-  musdb: /checkpoint/defossez/datasets/musdbhq
+  musdb: /content/drive/Shareddrives/Stem_Separation/MUSDB18-HQ
   musdb_samplerate: 44100
   use_musdb: true   # set to false to not use musdb as training data.
   wav:  # path to custom wav dataset
