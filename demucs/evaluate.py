@@ -44,10 +44,13 @@ def new_sdr(references, estimates):
 
 
 def eval_track(references, estimates, win, hop, compute_sdr=True):
+    
     references = references.transpose(1, 2).double()
     estimates = estimates.transpose(1, 2).double()
 
     new_scores = new_sdr(references.cpu()[None], estimates.cpu()[None])[0]
+
+    logger.info(f"New_sdr computed successfully. Scores: {new_scores.tolist()}") # .tolist() for cleaner log
 
     if not compute_sdr:
         return None, new_scores
@@ -78,6 +81,22 @@ def evaluate(solver, compute_sdr=False):
     json_folder = solver.folder / "results/test"
     json_folder.mkdir(exist_ok=True, parents=True)
 
+
+    # --- FORCING SERIAL EXECUTION ---
+    original_workers_setting = args.test.workers # Store the original setting
+    logger.info(f"[DEBUG] Original args.test.workers from config: {original_workers_setting}")
+    # We will use this to decide which executor to instantiate,
+    # and if ProcessPoolExecutor, what max_workers to pass.
+    # For DummyPoolExecutor, we don't pass max_workers.
+    use_serial_execution = True # Explicitly set to True for this debugging phase
+    if use_serial_execution:
+        logger.info(f"[DEBUG] Forcing serial execution for debugging (will use DummyPoolExecutor).")
+        current_workers_to_use = 0 
+    else:
+        logger.info(f"[DEBUG] Using configured worker count: {original_workers_setting}.")
+        current_workers_to_use = original_workers_setting
+    # --- END FORCING SERIAL ---
+
     # we load tracks from the original musdb set
     if args.test.nonhq is None:
         test_set = musdb.DB(args.dset.musdb, subsets=["test"], is_wav=True)
@@ -94,12 +113,24 @@ def evaluate(solver, compute_sdr=False):
     indexes = range(distrib.rank, len(test_set), distrib.world_size)
     indexes = LogProgress(logger, indexes, updates=args.misc.num_prints,
                           name='Eval')
+    
+    main_loop_progress = LogProgress(logger, list(indexes), updates=args.misc.num_prints, name='Eval')
+
     pendings = []
 
-    pool = futures.ProcessPoolExecutor if args.test.workers else DummyPoolExecutor
-    with pool(args.test.workers) as pool:
-        for index in indexes:
-            track = test_set.tracks[index]
+    # Determine which pool executor to use and how to instantiate it
+    if current_workers_to_use > 0:
+        logger.info(f"[DEBUG] Instantiating ProcessPoolExecutor with max_workers={current_workers_to_use}.")
+        pool_executor_instance = futures.ProcessPoolExecutor(max_workers=current_workers_to_use)
+    else:
+        logger.info(f"[DEBUG] Instantiating DummyPoolExecutor (no max_workers argument).")
+        pool_executor_instance = DummyPoolExecutor() # No max_workers here
+
+    with pool_executor_instance as pool:
+        for loop_idx, track_list_idx in enumerate(main_loop_progress): # main_loop_progress yields actual indices for test_set.tracks
+            track = test_set.tracks[track_list_idx]
+            logger.info(f"--- [EVAL ITEM {loop_idx + 1}/{len(test_set.tracks)}] START --- Track: {track.name} (index {track_list_idx}) ---")
+
 
             mix = th.from_numpy(track.audio).t().float()
             if mix.dim() == 1:
