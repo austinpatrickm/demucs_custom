@@ -381,99 +381,12 @@ class Solver(object):
                 logger.info(bold(f"Test Summary | Epoch {epoch + 1} | {_summary(formatted)}"))
             self.link.push_metrics(metrics)
 
-        # --- BEGIN ADDED DEBUG CODE ---
-        if distrib.rank == 0: # Only print on the main process
-            logger.info("--- DEBUG: Checking initial model weights after _reset() ---")
-            try:
-                # Load the reference pre-trained 'htdemucs' model
-                # This assumes 'htdemucs' is the target base model (like 955717e8)
-                logger.info("DEBUG: Loading reference 'htdemucs' from pretrained.get_model for comparison...")
-                reference_ht_model = pretrained.get_model('htdemucs')
-                reference_ht_model.to(self.device) # Move to the same device as self.model
-                reference_ht_model.eval() # Set to eval mode for consistency
-                
-                # Choose a specific parameter to compare. 
-                # You need to find a reliable path to a parameter that exists in HTDemucs.
-                # Example: a weight from the first convolutional layer in the encoder.
-                # The exact path might vary slightly depending on the HTDemucs internal structure.
-                # Let's try a common pattern. If this fails, you'll need to inspect `self.model.named_parameters()`
-                # and `reference_ht_model.named_parameters()` to find a matching named parameter.
-                
-                # Common parameter names to try:
-                # 'encoder.0.conv.weight' (if encoder is a list of blocks)
-                # 'encoder.layers.0.block.conv1.weight' (more nested example)
-                # 'htdemucs.encoder.bands.0.0.block.1.conv.weight' (even more specific for HTDemucs internals)
-                
-                # Let's pick one that's likely to exist and be somewhat unique early in the network
-                # A common starting point for Demucs-like models is the first encoder layer.
-                # If HTDemucs is a nn.Module with an 'encoder' attribute which is a nn.Sequential or nn.ModuleList:
-                param_name_to_check = "encoder.0.conv.weight" 
-                # Fallback if the above is not found, try to get *any* top-level parameter.
-                # This might be less informative but can at least show if models are *totally* different.
-                # param_name_to_check = next(self.model.named_parameters())[0] 
-
-                
-                solver_model_param = None
-                reference_model_param = None
-                
-                # Attempt to get the parameter from self.model
-                try:
-                    current_module = self.model
-                    for part in param_name_to_check.split('.'):
-                        if part.isdigit(): # Handles list/sequential indexing
-                            current_module = current_module[int(part)]
-                        else:
-                            current_module = getattr(current_module, part)
-                    solver_model_param = current_module
-                except (AttributeError, IndexError, TypeError) as e:
-                    logger.warning(f"DEBUG: Could not access '{param_name_to_check}' in self.model. Error: {e}")
-                    logger.warning("DEBUG: Listing first 5 named parameters of self.model:")
-                    for i, (name, _) in enumerate(self.model.named_parameters()):
-                        if i < 5: logger.warning(f"  {name}")
-                        else: break
-
-
-                # Attempt to get the parameter from reference_ht_model
-                try:
-                    current_module = reference_ht_model
-                    for part in param_name_to_check.split('.'):
-                        if part.isdigit():
-                            current_module = current_module[int(part)]
-                        else:
-                            current_module = getattr(current_module, part)
-                    reference_model_param = current_module
-                except (AttributeError, IndexError, TypeError) as e:
-                    logger.warning(f"DEBUG: Could not access '{param_name_to_check}' in reference_ht_model. Error: {e}")
-                    logger.warning("DEBUG: Listing first 5 named parameters of reference_ht_model:")
-                    for i, (name, _) in enumerate(reference_ht_model.named_parameters()):
-                        if i < 5: logger.warning(f"  {name}")
-                        else: break
-
-                if solver_model_param is not None and reference_model_param is not None:
-                    logger.info(f"DEBUG: Comparing parameter: {param_name_to_check}")
-                    logger.info(f"DEBUG: self.model '{param_name_to_check}' sum: {solver_model_param.abs().sum().item()}")
-                    logger.info(f"DEBUG: reference_ht_model '{param_name_to_check}' sum: {reference_model_param.abs().sum().item()}")
-                    logger.info(f"DEBUG: self.model '{param_name_to_check}' first 5 flat values: {solver_model_param.flatten()[:5].tolist()}")
-                    logger.info(f"DEBUG: reference_ht_model '{param_name_to_check}' first 5 flat values: {reference_model_param.flatten()[:5].tolist()}")
-
-                    if torch.allclose(solver_model_param, reference_model_param, atol=1e-6):
-                        logger.info(f"SUCCESS: Initial weights for '{param_name_to_check}' MATCH the 'htdemucs' pretrained model!")
-                    else:
-                        logger.error(f"FAILURE: Initial weights for '{param_name_to_check}' DO NOT MATCH the 'htdemucs' pretrained model!")
-                        diff = (solver_model_param - reference_model_param).abs().sum().item()
-                        logger.error(f"Sum of absolute differences for '{param_name_to_check}': {diff}")
-                else:
-                    logger.error(f"DEBUG: Could not compare parameters due to access issues for '{param_name_to_check}'.")
-
-                del reference_ht_model # Clean up memory
-                torch.cuda.empty_cache() # If on GPU
-
-            except ImportError:
-                logger.warning("DEBUG: Could not import 'demucs.pretrained' or 'torch' for weight comparison debug.")
-            except Exception as e:
-                logger.error(f"DEBUG: Error during weight comparison: {e}")
-            logger.info("--- DEBUG: Finished checking initial model weights ---")
-        # --- END ADDED DEBUG CODE ---
+            if distrib.rank == 0:
+                # Save model each epoch
+                self._serialize(epoch)
+                logger.info("Checkpoint saved to %s", self.checkpoint_file.resolve())
+            if is_last:
+                break
 
     def _run_one_epoch(self, epoch, train=True):
         args = self.args
