@@ -217,69 +217,18 @@ class Solver(object):
               logger.warning("--- Solver._reset(): Model will use its default/random initial weights due to UNEXPECTED EXCEPTION. ---")
 
         elif self.args.continue_from:
-            logger.info(f"DEBUG: args.continue_from is set: '{self.args.continue_from}'.")
             name = 'checkpoint.th'
             root = self.folder.parent
-            cf_path = root / str(self.args.continue_from) / name # Renamed variable
-            logger.info(f"DEBUG: Loading from other XP checkpoint: {cf_path}")
-            try:
-                package = torch.load(cf_path, 'cpu')
-                
-                load_target_state_dict = None
-                load_source_name = ""
-
-                if self.args.continue_best and 'best_state' in package and package['best_state'] is not None:
-                    logger.info("DEBUG: Attempting to load 'best_state' from continued XP checkpoint into self.model.")
-                    load_target_state_dict = package['best_state']
-                    load_source_name = "best_state"
-                elif 'state' in package and package['state'] is not None:
-                    logger.info("DEBUG: Attempting to load 'state' from continued XP checkpoint into self.model.")
-                    load_target_state_dict = package['state']
-                    load_source_name = "state"
-                else:
-                    logger.warning("DEBUG: Neither 'best_state' nor 'state' found or usable in continued XP checkpoint. self.model not loaded.")
-
-                if load_target_state_dict:
-                    try:
-                        self.model.load_state_dict(load_target_state_dict, strict=True)
-                        logger.info(f"DEBUG: Successfully loaded self.model weights from '{load_source_name}' of continued XP (strict=True).")
-                        loaded_successfully = True
-                    except RuntimeError as e_strict:
-                        logger.error(f"DEBUG: Error loading self.model from '{load_source_name}' of continued XP with strict=True: {e_strict}")
-                        logger.info(f"DEBUG: Attempting to load self.model from '{load_source_name}' of continued XP with strict=False...")
-                        try:
-                            self.model.load_state_dict(load_target_state_dict, strict=False)
-                            logger.warning(f"DEBUG: Loaded self.model weights from '{load_source_name}' of continued XP with strict=False. Potential mismatches.")
-                            loaded_successfully = True # Still count as loaded for the flag
-                        except RuntimeError as e_non_strict:
-                            logger.error(f"DEBUG: Error loading self.model from '{load_source_name}' of continued XP with strict=False also failed: {e_non_strict}")
-                
-                # Set current run's best_state from the continued XP's best_state
-                self.best_state = package.get('best_state', None)
-                logger.info(f"DEBUG: self.best_state set from continued XP's 'best_state' (is None: {self.best_state is None}).")
-
-                if self.args.continue_opt and 'optimizer' in package and package['optimizer'] is not None:
-                    self.optimizer.load_state_dict(package['optimizer'])
-                    logger.info("DEBUG: Optimizer state loaded from continued XP checkpoint.")
-                else:
-                    logger.info("DEBUG: Optimizer state not loaded from continued XP checkpoint (continue_opt or key missing).")
-                # History is NOT loaded from continue_from by default in this structure
-
-            except FileNotFoundError:
-                logger.error(f"DEBUG: Checkpoint file for continue_from not found: {cf_path}")
-                self.best_state = None
-            except Exception as e:
-                logger.error(f"DEBUG: Error loading package from continue_from path {cf_path}: {e}", exc_info=True)
-                self.best_state = None
-        
-        else: # No checkpoint, no continue_pretrained, no continue_from
-            logger.info("DEBUG: No existing checkpoint, continue_pretrained, or continue_from. self.model will use its initial weights.")
-            logger.info("DEBUG: self.history will be empty. self.best_state is None.")
-            self.best_state = None # Explicitly ensure it's None
-
-        if not loaded_successfully and not self.checkpoint_file.exists(): # If no weights were loaded by any means and not resuming
-             logger.warning("DEBUG: self.model is using its default/random initial weights as no loading condition was met.")
-        logger.info("--- DEBUG: Exiting _reset() ---")
+            cf = root / str(self.args.continue_from) / name
+            logger.info("Loading from %s", cf)
+            package = torch.load(cf, 'cpu')
+            self.best_state = package['best_state']
+            if self.args.continue_best:
+                self.model.load_state_dict(package['best_state'], strict=False)
+            else:
+                self.model.load_state_dict(package['state'], strict=False)
+            if self.args.continue_opt:
+                self.optimizer.load_state_dict(package['optimizer'])
 
 
     def _format_train(self, metrics: dict) -> dict:
