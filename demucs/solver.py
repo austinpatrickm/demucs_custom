@@ -102,37 +102,188 @@ class Solver(object):
 
     def _reset(self):
         """Reset state of the solver, potentially using checkpoint."""
+        logger.info("--- DEBUG: Entering _reset() ---")
+        loaded_successfully = False # Flag to track if any loading path was successful for the model
+
         if self.checkpoint_file.exists():
-            logger.info(f'Loading checkpoint model: {self.checkpoint_file}')
+            logger.info(f'DEBUG: Found existing checkpoint for current XP: {self.checkpoint_file}')
+            logger.info(f'DEBUG: Loading state from this existing checkpoint (resuming current XP).')
             package = torch.load(self.checkpoint_file, 'cpu')
-            self.model.load_state_dict(package['state'])
-            self.optimizer.load_state_dict(package['optimizer'])
-            self.history[:] = package['history']
-            self.best_state = package['best_state']
-            for kind, emas in self.emas.items():
-                for k, ema in enumerate(emas):
-                    ema.load_state_dict(package[f'ema_{kind}_{k}'])
+            
+            if 'state' in package and package['state'] is not None:
+                self.model.load_state_dict(package['state'])
+                logger.info("DEBUG: self.model weights loaded from current XP checkpoint ('state').")
+                loaded_successfully = True
+            else:
+                logger.warning("DEBUG: 'state' key not found or is None in current XP checkpoint. self.model not loaded.")
+
+            if self.args.continue_opt and 'optimizer' in package and package['optimizer'] is not None:
+                self.optimizer.load_state_dict(package['optimizer'])
+                logger.info("DEBUG: Optimizer state loaded from current XP checkpoint.")
+            else:
+                logger.info("DEBUG: Optimizer state not loaded from current XP checkpoint (continue_opt or key missing).")
+            
+            self.history[:] = package.get('history', [])
+            self.best_state = package.get('best_state', None)
+            logger.info(f"DEBUG: self.best_state set from current XP checkpoint (is None: {self.best_state is None}).")
+            # ... (EMA loading logic if present in your actual code)
+            for kind, emas_list in self.emas.items(): # Corrected variable name
+                for k_idx, ema_model in enumerate(emas_list): # Corrected variable name
+                    ema_key = f'ema_{kind}_{k_idx}'
+                    if ema_key in package:
+                        ema_model.load_state_dict(package[ema_key])
+                        logger.info(f"DEBUG: Loaded state for {ema_key}.")
+
+
         elif self.args.continue_pretrained:
-            model = pretrained.get_model(
-                name=self.args.continue_pretrained,
-                repo=self.args.pretrained_repo)
-            self.model.load_state_dict(model.state_dict())
+          logger.info(f"--- Solver._reset(): Attempting to load from continue_pretrained='{self.args.continue_pretrained}' ---")
+          try:
+              # Get the pretrained model object and its state_dict
+              pretrained_model_object = pretrained.get_model(
+                  name=self.args.continue_pretrained,
+                  repo=self.args.pretrained_repo
+              )
+              pretrained_sd = pretrained_model_object.state_dict()
+              
+              logger.info(f"DEBUG: Fetched pretrained model '{self.args.continue_pretrained}'. Number of keys in its state_dict: {len(pretrained_sd)}.")
+              # Log first 3 keys from pretrained model to see their structure
+              if pretrained_sd:
+                  logger.debug(f"DEBUG: First 3 keys from PRETRAINED state_dict: {list(pretrained_sd.keys())[:3]}")
+
+              # Log first 3 keys from current self.model (BEFORE loading) to see its expected structure
+              current_model_sd = self.model.state_dict()
+              logger.info(f"DEBUG: Current self.model (before loading). Number of keys: {len(current_model_sd)}.")
+              if current_model_sd:
+                  logger.debug(f"DEBUG: First 3 keys from CURRENT self.model state_dict: {list(current_model_sd.keys())[:3]}")
+
+              # NEW: Check if we need to remove a prefix from the pretrained keys
+              pretrained_keys = list(pretrained_sd.keys())
+              current_keys = list(current_model_sd.keys())
+              
+              # Check if pretrained keys have a common prefix that current keys don't have
+              needs_prefix_removal = False
+              prefix_to_remove = ""
+              
+              if pretrained_keys and current_keys:
+                  # Look for common prefixes in pretrained keys
+                  potential_prefixes = ["models.0.", "model.", "module."]
+                  
+                  for prefix in potential_prefixes:
+                      if all(key.startswith(prefix) for key in pretrained_keys):
+                          # Check if removing this prefix would match current keys
+                          stripped_keys = [key[len(prefix):] for key in pretrained_keys]
+                          if set(stripped_keys) == set(current_keys):
+                              needs_prefix_removal = True
+                              prefix_to_remove = prefix
+                              logger.info(f"DEBUG: Detected need to remove prefix '{prefix_to_remove}' from pretrained keys")
+                              break
+              
+              # Create the corrected state dict
+              if needs_prefix_removal:
+                  logger.info(f"DEBUG: Removing prefix '{prefix_to_remove}' from pretrained state dict keys")
+                  corrected_sd = {}
+                  for key, value in pretrained_sd.items():
+                      new_key = key[len(prefix_to_remove):]
+                      corrected_sd[new_key] = value
+                  pretrained_sd = corrected_sd
+                  logger.info(f"DEBUG: After prefix removal, first 3 keys: {list(pretrained_sd.keys())[:3]}")
+
+              # The crucial line: This uses strict=True by default
+              logger.info(f"DEBUG: Attempting self.model.load_state_dict(pretrained_sd) (strict=True by default).")
+              missing_keys, unexpected_keys = self.model.load_state_dict(pretrained_sd, strict=False)
+              
+              if missing_keys:
+                  logger.warning(f"DEBUG: Missing keys when loading pretrained weights: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+              if unexpected_keys:
+                  logger.warning(f"DEBUG: Unexpected keys when loading pretrained weights: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+              
+              # Check if the loading was successful (no missing keys for important parameters)
+              if not missing_keys and not unexpected_keys:
+                  logger.info(f"--- Solver._reset(): PERFECTLY loaded weights from pretrained '{self.args.continue_pretrained}'. Fine-tuning will proceed with these weights. ---")
+              elif len(missing_keys) == 0:
+                  logger.info(f"--- Solver._reset(): SUCCESSFULLY loaded weights from pretrained '{self.args.continue_pretrained}' (with some unexpected keys ignored). Fine-tuning will proceed. ---")
+              else:
+                  logger.warning(f"--- Solver._reset(): PARTIALLY loaded weights from pretrained '{self.args.continue_pretrained}'. {len(missing_keys)} keys were missing. Fine-tuning will proceed but some layers will use random weights. ---")
+
+          except RuntimeError as e:
+              # This block will execute if load_state_dict (strict=True) fails due to key mismatch or other issues.
+              logger.error(f"--- Solver._reset(): FAILED to load weights from pretrained '{self.args.continue_pretrained}' due to RuntimeError: ---")
+              logger.error(e) # This will print the detailed "Missing key(s)... Unexpected key(s)..." error
+              logger.warning("--- Solver._reset(): Model will use its default/random initial weights. NOT FINE-TUNING. ---")
+              # The training will continue, but from scratch.
+          except Exception as e:
+              # Catch any other unexpected errors during pretrained.get_model or .state_dict() calls
+              logger.error(f"--- Solver._reset(): UNEXPECTED EXCEPTION during continue_pretrained loading for '{self.args.continue_pretrained}': {e} ---", exc_info=True)
+              logger.warning("--- Solver._reset(): Model will use its default/random initial weights due to UNEXPECTED EXCEPTION. ---")
+
         elif self.args.continue_from:
+            logger.info(f"DEBUG: args.continue_from is set: '{self.args.continue_from}'.")
             name = 'checkpoint.th'
             root = self.folder.parent
-            cf = root / str(self.args.continue_from) / name
-            logger.info("Loading from %s", cf)
-            package = torch.load(cf, 'cpu')
-            self.best_state = package['best_state']
-            if self.args.continue_best:
-                self.model.load_state_dict(package['best_state'], strict=False)
-            else:
-                self.model.load_state_dict(package['state'], strict=False)
-            if self.args.continue_opt:
-                self.optimizer.load_state_dict(package['optimizer'])
+            cf_path = root / str(self.args.continue_from) / name # Renamed variable
+            logger.info(f"DEBUG: Loading from other XP checkpoint: {cf_path}")
+            try:
+                package = torch.load(cf_path, 'cpu')
+                
+                load_target_state_dict = None
+                load_source_name = ""
+
+                if self.args.continue_best and 'best_state' in package and package['best_state'] is not None:
+                    logger.info("DEBUG: Attempting to load 'best_state' from continued XP checkpoint into self.model.")
+                    load_target_state_dict = package['best_state']
+                    load_source_name = "best_state"
+                elif 'state' in package and package['state'] is not None:
+                    logger.info("DEBUG: Attempting to load 'state' from continued XP checkpoint into self.model.")
+                    load_target_state_dict = package['state']
+                    load_source_name = "state"
+                else:
+                    logger.warning("DEBUG: Neither 'best_state' nor 'state' found or usable in continued XP checkpoint. self.model not loaded.")
+
+                if load_target_state_dict:
+                    try:
+                        self.model.load_state_dict(load_target_state_dict, strict=True)
+                        logger.info(f"DEBUG: Successfully loaded self.model weights from '{load_source_name}' of continued XP (strict=True).")
+                        loaded_successfully = True
+                    except RuntimeError as e_strict:
+                        logger.error(f"DEBUG: Error loading self.model from '{load_source_name}' of continued XP with strict=True: {e_strict}")
+                        logger.info(f"DEBUG: Attempting to load self.model from '{load_source_name}' of continued XP with strict=False...")
+                        try:
+                            self.model.load_state_dict(load_target_state_dict, strict=False)
+                            logger.warning(f"DEBUG: Loaded self.model weights from '{load_source_name}' of continued XP with strict=False. Potential mismatches.")
+                            loaded_successfully = True # Still count as loaded for the flag
+                        except RuntimeError as e_non_strict:
+                            logger.error(f"DEBUG: Error loading self.model from '{load_source_name}' of continued XP with strict=False also failed: {e_non_strict}")
+                
+                # Set current run's best_state from the continued XP's best_state
+                self.best_state = package.get('best_state', None)
+                logger.info(f"DEBUG: self.best_state set from continued XP's 'best_state' (is None: {self.best_state is None}).")
+
+                if self.args.continue_opt and 'optimizer' in package and package['optimizer'] is not None:
+                    self.optimizer.load_state_dict(package['optimizer'])
+                    logger.info("DEBUG: Optimizer state loaded from continued XP checkpoint.")
+                else:
+                    logger.info("DEBUG: Optimizer state not loaded from continued XP checkpoint (continue_opt or key missing).")
+                # History is NOT loaded from continue_from by default in this structure
+
+            except FileNotFoundError:
+                logger.error(f"DEBUG: Checkpoint file for continue_from not found: {cf_path}")
+                self.best_state = None
+            except Exception as e:
+                logger.error(f"DEBUG: Error loading package from continue_from path {cf_path}: {e}", exc_info=True)
+                self.best_state = None
+        
+        else: # No checkpoint, no continue_pretrained, no continue_from
+            logger.info("DEBUG: No existing checkpoint, continue_pretrained, or continue_from. self.model will use its initial weights.")
+            logger.info("DEBUG: self.history will be empty. self.best_state is None.")
+            self.best_state = None # Explicitly ensure it's None
+
+        if not loaded_successfully and not self.checkpoint_file.exists(): # If no weights were loaded by any means and not resuming
+             logger.warning("DEBUG: self.model is using its default/random initial weights as no loading condition was met.")
+        logger.info("--- DEBUG: Exiting _reset() ---")
+
 
     def _format_train(self, metrics: dict) -> dict:
-        """Formatting for train/valid metrics."""
+        """Formatting for train/valid metrics.""" 
         losses = {
             'loss': format(metrics['loss'], ".4f"),
             'reco': format(metrics['reco'], ".4f"),
@@ -281,12 +432,99 @@ class Solver(object):
                 logger.info(bold(f"Test Summary | Epoch {epoch + 1} | {_summary(formatted)}"))
             self.link.push_metrics(metrics)
 
-            if distrib.rank == 0:
-                # Save model each epoch
-                self._serialize(epoch)
-                logger.debug("Checkpoint saved to %s", self.checkpoint_file.resolve())
-            if is_last:
-                break
+        # --- BEGIN ADDED DEBUG CODE ---
+        if distrib.rank == 0: # Only print on the main process
+            logger.info("--- DEBUG: Checking initial model weights after _reset() ---")
+            try:
+                # Load the reference pre-trained 'htdemucs' model
+                # This assumes 'htdemucs' is the target base model (like 955717e8)
+                logger.info("DEBUG: Loading reference 'htdemucs' from pretrained.get_model for comparison...")
+                reference_ht_model = pretrained.get_model('htdemucs')
+                reference_ht_model.to(self.device) # Move to the same device as self.model
+                reference_ht_model.eval() # Set to eval mode for consistency
+                
+                # Choose a specific parameter to compare. 
+                # You need to find a reliable path to a parameter that exists in HTDemucs.
+                # Example: a weight from the first convolutional layer in the encoder.
+                # The exact path might vary slightly depending on the HTDemucs internal structure.
+                # Let's try a common pattern. If this fails, you'll need to inspect `self.model.named_parameters()`
+                # and `reference_ht_model.named_parameters()` to find a matching named parameter.
+                
+                # Common parameter names to try:
+                # 'encoder.0.conv.weight' (if encoder is a list of blocks)
+                # 'encoder.layers.0.block.conv1.weight' (more nested example)
+                # 'htdemucs.encoder.bands.0.0.block.1.conv.weight' (even more specific for HTDemucs internals)
+                
+                # Let's pick one that's likely to exist and be somewhat unique early in the network
+                # A common starting point for Demucs-like models is the first encoder layer.
+                # If HTDemucs is a nn.Module with an 'encoder' attribute which is a nn.Sequential or nn.ModuleList:
+                param_name_to_check = "encoder.0.conv.weight" 
+                # Fallback if the above is not found, try to get *any* top-level parameter.
+                # This might be less informative but can at least show if models are *totally* different.
+                # param_name_to_check = next(self.model.named_parameters())[0] 
+
+                
+                solver_model_param = None
+                reference_model_param = None
+                
+                # Attempt to get the parameter from self.model
+                try:
+                    current_module = self.model
+                    for part in param_name_to_check.split('.'):
+                        if part.isdigit(): # Handles list/sequential indexing
+                            current_module = current_module[int(part)]
+                        else:
+                            current_module = getattr(current_module, part)
+                    solver_model_param = current_module
+                except (AttributeError, IndexError, TypeError) as e:
+                    logger.warning(f"DEBUG: Could not access '{param_name_to_check}' in self.model. Error: {e}")
+                    logger.warning("DEBUG: Listing first 5 named parameters of self.model:")
+                    for i, (name, _) in enumerate(self.model.named_parameters()):
+                        if i < 5: logger.warning(f"  {name}")
+                        else: break
+
+
+                # Attempt to get the parameter from reference_ht_model
+                try:
+                    current_module = reference_ht_model
+                    for part in param_name_to_check.split('.'):
+                        if part.isdigit():
+                            current_module = current_module[int(part)]
+                        else:
+                            current_module = getattr(current_module, part)
+                    reference_model_param = current_module
+                except (AttributeError, IndexError, TypeError) as e:
+                    logger.warning(f"DEBUG: Could not access '{param_name_to_check}' in reference_ht_model. Error: {e}")
+                    logger.warning("DEBUG: Listing first 5 named parameters of reference_ht_model:")
+                    for i, (name, _) in enumerate(reference_ht_model.named_parameters()):
+                        if i < 5: logger.warning(f"  {name}")
+                        else: break
+
+                if solver_model_param is not None and reference_model_param is not None:
+                    logger.info(f"DEBUG: Comparing parameter: {param_name_to_check}")
+                    logger.info(f"DEBUG: self.model '{param_name_to_check}' sum: {solver_model_param.abs().sum().item()}")
+                    logger.info(f"DEBUG: reference_ht_model '{param_name_to_check}' sum: {reference_model_param.abs().sum().item()}")
+                    logger.info(f"DEBUG: self.model '{param_name_to_check}' first 5 flat values: {solver_model_param.flatten()[:5].tolist()}")
+                    logger.info(f"DEBUG: reference_ht_model '{param_name_to_check}' first 5 flat values: {reference_model_param.flatten()[:5].tolist()}")
+
+                    if torch.allclose(solver_model_param, reference_model_param, atol=1e-6):
+                        logger.info(f"SUCCESS: Initial weights for '{param_name_to_check}' MATCH the 'htdemucs' pretrained model!")
+                    else:
+                        logger.error(f"FAILURE: Initial weights for '{param_name_to_check}' DO NOT MATCH the 'htdemucs' pretrained model!")
+                        diff = (solver_model_param - reference_model_param).abs().sum().item()
+                        logger.error(f"Sum of absolute differences for '{param_name_to_check}': {diff}")
+                else:
+                    logger.error(f"DEBUG: Could not compare parameters due to access issues for '{param_name_to_check}'.")
+
+                del reference_ht_model # Clean up memory
+                torch.cuda.empty_cache() # If on GPU
+
+            except ImportError:
+                logger.warning("DEBUG: Could not import 'demucs.pretrained' or 'torch' for weight comparison debug.")
+            except Exception as e:
+                logger.error(f"DEBUG: Error during weight comparison: {e}")
+            logger.info("--- DEBUG: Finished checking initial model weights ---")
+        # --- END ADDED DEBUG CODE ---
 
     def _run_one_epoch(self, epoch, train=True):
         args = self.args
