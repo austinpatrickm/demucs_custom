@@ -71,7 +71,7 @@ def repitch(wav, pitch, tempo, voice=False, quick=False, samplerate=44100):
         infile.name,
         outfile.name,
         f"-pitch={pitch}",
-        f"-tempo={tempo:.6f}",
+        f"-tempo={float(tempo):.6f}",
     ]
     if quick:
         command += ["-quick"]
