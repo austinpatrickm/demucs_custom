@@ -218,7 +218,70 @@ def _get_musdb_valid():
     import yaml
     setup_path = Path(musdb.__path__[0]) / 'configs' / 'mus.yaml'
     setup = yaml.safe_load(open(setup_path, 'r'))
+    print(setup)
     return setup['validation_tracks']
+
+
+def get_moisesdb_wav_datasets(args):
+    """
+    Create train/validation datasets from a data folder, using a pre-defined
+    list of track names from the config for the validation set.
+    """
+    root = Path(args.musdb) / "train"
+
+    
+    # 1. Get the validation track list directly from the config.
+    #    Using a set is more efficient for checking 'if name in ...'
+    valid_tracks = set(args.valid_tracks)
+    
+    print(f"Using {len(valid_tracks)} pre-defined tracks for validation.")
+
+    # 2. Build metadata for the training data directory if needed.
+    #    The cache signature should depend on the list of validation tracks
+    #    to ensure it's unique to this specific train/valid split.
+    valid_hash = hashlib.sha1(str(sorted(list(valid_tracks))).encode()).hexdigest()[:8]
+    metadata_file = Path(args.metadata) / f'moisesdb_split_{valid_hash}.json'
+    
+    if not metadata_file.is_file() and distrib.rank == 0:
+        print(f"Metadata file {metadata_file} not found. Building it from '{root}'...")
+        metadata_file.parent.mkdir(exist_ok=True, parents=True)
+        metadata = build_metadata(root, args.sources)
+        json.dump(metadata, open(metadata_file, "w"))
+    
+    if distrib.world_size > 1:
+        distributed.barrier()
+    
+    metadata = json.load(open(metadata_file))
+
+    # 3. Split the metadata using the track names from the config.
+    metadata_train = {name: meta for name, meta in metadata.items() if name not in valid_tracks}
+    metadata_valid = {name: meta for name, meta in metadata.items() if name in valid_tracks}
+    
+    # Sanity check
+    if len(metadata_valid) != len(valid_tracks):
+        print("Warning: Some tracks specified in 'valid_tracks' were not found in the dataset.")
+
+    print(f"Total tracks in '{root}': {len(metadata)}")
+    print(f"Training set size: {len(metadata_train)}")
+    print(f"Validation set size: {len(metadata_valid)}")
+
+    # 4. Create the Wavset datasets (no changes in this part).
+    if args.full_cv:
+        kw_cv = {}
+    else:
+        kw_cv = {'segment': args.segment, 'shift': args.shift}
+        
+    train_set = Wavset(root, metadata_train, args.sources,
+                       segment=args.segment, shift=args.shift,
+                       samplerate=args.samplerate, channels=args.channels,
+                       normalize=args.normalize)
+    
+    valid_set = Wavset(root, metadata_valid, [MIXTURE] + list(args.sources),
+                       samplerate=args.samplerate, channels=args.channels,
+                       normalize=args.normalize, **kw_cv)
+                       
+    return train_set, valid_set
+
 
 
 def get_musdb_wav_datasets(args):
