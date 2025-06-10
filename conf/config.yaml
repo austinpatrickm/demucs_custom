@@ -23,7 +23,22 @@ dset:
   metadata: ./metadata
   sources: ['drums', 'bass', 'other', 'vocals']
   valid_samples: # valid dataset size
-  backend: null   # if provided select torchaudio backend.
+  backend: null   # if provided select torchaudio backend
+  valid_tracks: ['Black_Mountain', 
+                 'Crackling_On_The_Wire', 
+                 'Get_It_Together', 
+                 'Hungry_Mind', 
+                 'Keratin', 
+                 "La_Venus_D'Argent_", 
+                 'Real', 
+                 'Record_Still_Spinning', 
+                 'Scars_On_The_Lining', 
+                 'Stolen_Car', 
+                 'Too_Late', 
+                 'Trail_Away', 
+                 'Up_In_The_Air', 
+                 'Éternelle'] # All 'electronic' tracks fromMoisesDB 
+
 
 test:
   save: False
